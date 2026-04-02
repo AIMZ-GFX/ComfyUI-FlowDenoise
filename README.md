@@ -4,8 +4,9 @@ Professional motion-compensated temporal video denoising for ComfyUI.
 
 FlowDenoise leverages state-of-the-art optical flow estimation (MEMFOF / RAFT) to align neighboring frames, then separates and removes chroma and luma noise with independent per-channel control. Purpose-built for suppressing AI-generated video artifacts including color flicker, chroma spikes, and temporal noise patterns.
 
-[Demo Video] [https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b](https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b)
-[Workflow Example] <img width="4077" height="3009" alt="Image" src="https://github.com/user-attachments/assets/8fe3f59e-2b68-459b-9074-ddc31c1b2f4a" />
+## Demo Video
+<video src="https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b](https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b" autoplay loop muted playsinline></video>
+
 ## Features
 
 - **Optical flow alignment** via MEMFOF (state-of-the-art 2025) or RAFT models
@@ -159,6 +160,9 @@ Selective Denoise:
 5. **Selective Blending**: Original and clean frames are blended with independent control per component
 
 This purely mathematical approach requires no training, works on any video content, and produces deterministic results.
+
+## Workflow Example
+<img width="4077" height="3009" alt="Image" src="https://github.com/user-attachments/assets/8fe3f59e-2b68-459b-9074-ddc31c1b2f4a" />
 
 ## License
 
