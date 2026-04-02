@@ -1,4 +1,5 @@
 <img width="4000" height="1080" alt="Image" src="https://github.com/user-attachments/assets/b9dc18c0-a08d-4cb6-8ea5-e0e713e26949" />
+
 *Developed by AIMZ GFX Division*
 
 # ComfyUI-FlowDenoise
