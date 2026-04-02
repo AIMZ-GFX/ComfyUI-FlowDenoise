@@ -3,7 +3,7 @@
 Professional motion-compensated temporal video denoising for ComfyUI.
 
 FlowDenoise leverages state-of-the-art optical flow estimation (MEMFOF / RAFT) to align neighboring frames, then separates and removes chroma and luma noise with independent per-channel control. Purpose-built for suppressing AI-generated video artifacts including color flicker, chroma spikes, and temporal noise patterns.
-
+https://github.com/AIMZ-GFX/ComfyUI-FlowDenoise/issues/1#issue-4193001304
 ## Features
 
 - **Optical flow alignment** via MEMFOF (state-of-the-art 2025) or RAFT models
