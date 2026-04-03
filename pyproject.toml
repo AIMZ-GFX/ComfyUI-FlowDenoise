@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-flowdenoise"
+description = "Professional motion-compensated temporal video denoising for ComfyUI. Optical flow-based (MEMFOF/RAFT) temporal averaging with independent chroma/luma denoising control."
+version = "1.0.1"
+license = "MIT"
+requires-python = ">= 3.10"
+dependencies = ["memfof @ git+https://github.com/msu-video-group/memfof.git"]
+
+[project.urls]
+Repository = "https://github.com/AIMZ-GFX/ComfyUI-FlowDenoise"
+
+[tool.comfy]
+PublisherId = "aimz-gfx"
+DisplayName = "FlowDenoise"
+Icon = ""
