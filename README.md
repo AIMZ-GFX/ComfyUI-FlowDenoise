@@ -11,6 +11,9 @@ FlowDenoise leverages state-of-the-art optical flow estimation (MEMFOF / RAFT) t
 ## Demo Video
 <video src="https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b](https://github.com/user-attachments/assets/6fc3cc87-5e5c-425c-9bc6-c4711ef8b53b" autoplay loop muted playsinline></video>
 
+*Full Demo Video*
+*https://www.youtube.com/watch?v=Z1o1tuOBPQ0*
+
 ## Features
 
 - **Optical flow alignment** via MEMFOF (state-of-the-art 2025) or RAFT models
