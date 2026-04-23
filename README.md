@@ -38,9 +38,19 @@ git clone https://github.com/AIMZ-GFX/ComfyUI-FlowDenoise.git
 
 ### Dependencies
 
+The `memfof` package is not on PyPI and must be installed from GitHub:
+
 ```bash
-pip install memfof
+pip install git+https://github.com/msu-video-group/memfof.git
 ```
+
+**ComfyUI Portable users** must use the embedded Python:
+
+```bash
+python_embeded\python.exe -m pip install git+https://github.com/msu-video-group/memfof.git
+```
+
+If installed via ComfyUI-Manager, `requirements.txt` and `install.py` will handle this automatically.
 
 The MEMFOF optical flow model (`egorchistov/optical-flow-MEMFOF-Tartan-T-TSKH`) is automatically downloaded from HuggingFace on first use.
 
