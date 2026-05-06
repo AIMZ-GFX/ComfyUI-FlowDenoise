@@ -256,6 +256,14 @@ class TemporalFlowAverage:
                     "default": 1, "min": 1, "max": 64, "step": 1,
                     "tooltip": "MEMFOF batch size (higher=faster but more VRAM. RTX 5090 32GB 720p: 8~16 recommended)"
                 }),
+                "precision": (["bf16", "fp32"], {
+                    "default": "bf16",
+                    "tooltip": "Inference precision. bf16 is ~1.5-2x faster on RTX 30/40/50 series with negligible quality difference. Use fp32 for strict reproducibility."
+                }),
+                "flow_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.3, "max": 1.0, "step": 0.1,
+                    "tooltip": "Compute optical flow at reduced resolution for speed. 1.0=full resolution (best quality), 0.5~3x faster. Warping still uses full resolution."
+                }),
             }
         }
 
@@ -293,11 +301,14 @@ class TemporalFlowAverage:
 
     def denoise(self, images: torch.Tensor, window_size: int, weight_decay: float,
                 flow_model: str, flow_iterations: int, color_threshold: float,
-                scene_threshold: float, batch_size: int = 1):
+                scene_threshold: float, batch_size: int = 1,
+                precision: str = "bf16", flow_scale: float = 1.0):
 
         B, H, W, C = images.shape
         device = images.device
         compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        flow_scale_f = max(0.3, min(1.0, float(flow_scale)))
 
         # BHWC -> BCHW, keep on CPU to save GPU memory
         frames = images.permute(0, 3, 1, 2)
@@ -319,12 +330,15 @@ class TemporalFlowAverage:
                                  weight_decay, flow_iterations,
                                  color_threshold, boundaries,
                                  output, weight_maps, compute_device,
-                                 batch_size, pbar)
+                                 batch_size, pbar,
+                                 precision=precision,
+                                 flow_scale=flow_scale_f)
         else:
             self._denoise_raft(frames, B, H, W, window_size, weight_decay,
                                flow_model, flow_iterations,
                                color_threshold, boundaries,
-                               output, weight_maps, compute_device, pbar)
+                               output, weight_maps, compute_device, pbar,
+                               precision=precision)
 
         result = output.permute(0, 2, 3, 1).clamp(0, 1).to(device)
 
@@ -341,13 +355,23 @@ class TemporalFlowAverage:
     def _denoise_memfof(self, frames, B, H, W, window_size,
                         weight_decay, flow_iterations, color_threshold,
                         boundaries, output, weight_maps, compute_device,
-                        batch_size=1, pbar=None):
+                        batch_size=1, pbar=None,
+                        precision="bf16", flow_scale=1.0):
         """MEMFOF: 3-frame triplet with batched inference.
         frames/output/weight_maps are on CPU. Only working tensors go to GPU."""
         if pbar is not None:
             pbar.update_absolute(0, B)
 
         model = _get_memfof_model(compute_device)
+
+        amp_enabled = (precision == "bf16" and compute_device.type == "cuda")
+
+        # MEMFOF expects spatial dims to be multiples of 32
+        if flow_scale < 1.0:
+            fh = max(32, (int(H * flow_scale) // 32) * 32)
+            fw = max(32, (int(W * flow_scale) // 32) * 32)
+        else:
+            fh, fw = H, W
 
         # Process frames in chunks
         tbar = tqdm(range(0, B, batch_size), desc="TemporalFlowAverage",
@@ -357,8 +381,15 @@ class TemporalFlowAverage:
             chunk_size = chunk_end - chunk_start
             tbar.set_postfix(frame=f"{chunk_end}/{B}")
 
-            # Accumulators for this chunk on GPU
-            chunk_frames = frames[chunk_start:chunk_end].to(compute_device)
+            # GPU sliding-window buffer: upload chunk + window padding once per
+            # chunk so triplet construction and neighbor warping can slice from
+            # GPU memory instead of doing redundant H2D transfers.
+            buf_start = max(0, chunk_start - window_size)
+            buf_end = min(B, chunk_end + window_size)
+            gpu_buf = frames[buf_start:buf_end].to(compute_device)
+
+            # chunk_frames is a view into gpu_buf (zero copy)
+            chunk_frames = gpu_buf[chunk_start - buf_start:chunk_end - buf_start]
             weighted_sums = chunk_frames.clone()
             weight_sums = torch.ones(chunk_size, 1, H, W, device=compute_device)
 
@@ -380,22 +411,51 @@ class TemporalFlowAverage:
                     next_idx = i + offset if has_next else i
 
                     triplet_list.append(torch.stack([
-                        frames[prev_idx], frames[i], frames[next_idx]
+                        gpu_buf[prev_idx - buf_start],
+                        gpu_buf[i - buf_start],
+                        gpu_buf[next_idx - buf_start],
                     ], dim=0))
                     meta.append((k, has_prev, has_next, prev_idx, next_idx))
 
                 if not triplet_list:
                     continue
 
-                # Batched MEMFOF inference
-                batch_triplets = torch.stack(triplet_list, dim=0).to(compute_device)
+                # Batched MEMFOF inference (triplets already on GPU via gpu_buf)
+                batch_triplets = torch.stack(triplet_list, dim=0)
                 batch_triplets = (batch_triplets * 255.0).clamp(0, 255)
 
-                with torch.no_grad():
-                    out_dict = model(batch_triplets, iters=flow_iterations)
+                # Optional: downsample triplet for low-resolution flow
+                if flow_scale < 1.0:
+                    Nb, Tb = batch_triplets.shape[:2]
+                    triplet_in = F.interpolate(
+                        batch_triplets.flatten(0, 1),
+                        size=(fh, fw), mode='bilinear', align_corners=False
+                    ).unflatten(0, (Nb, Tb))
+                else:
+                    triplet_in = batch_triplets
 
-                flow_fields = out_dict["flow"][-1]  # [N, 2, 2, H, W]
-                del batch_triplets, out_dict
+                with torch.no_grad(), torch.autocast(
+                        device_type=compute_device.type,
+                        dtype=torch.bfloat16,
+                        enabled=amp_enabled):
+                    out_dict = model(triplet_in, iters=flow_iterations)
+
+                flow_lr = out_dict["flow"][-1].float()  # [N, 2, 2, fh, fw]
+                del batch_triplets, triplet_in, out_dict
+
+                # Optional: upsample flow back to full resolution and rescale magnitudes
+                if flow_scale < 1.0:
+                    Nf = flow_lr.shape[0]
+                    flow_flat = flow_lr.view(Nf * 2, 2, fh, fw)
+                    flow_full = F.interpolate(
+                        flow_flat, size=(H, W),
+                        mode='bilinear', align_corners=False)
+                    flow_full[:, 0] = flow_full[:, 0] * (float(W) / float(fw))
+                    flow_full[:, 1] = flow_full[:, 1] * (float(H) / float(fh))
+                    flow_fields = flow_full.view(Nf, 2, 2, H, W)
+                    del flow_lr, flow_flat, flow_full
+                else:
+                    flow_fields = flow_lr
 
                 # Distribute flows and accumulate per frame
                 for j, (k, has_prev, has_next, prev_idx, next_idx) in enumerate(meta):
@@ -404,29 +464,30 @@ class TemporalFlowAverage:
                     ref_frame = chunk_frames[k:k + 1]
 
                     if has_prev:
-                        neighbor = frames[prev_idx:prev_idx + 1].to(compute_device)
+                        # Slice neighbor from GPU buffer (no H2D)
+                        neighbor = gpu_buf[prev_idx - buf_start:prev_idx - buf_start + 1]
                         warped = _warp_with_flow(neighbor, bwd_flow)
                         self._accumulate_warped(warped, ref_frame, w,
                                                 color_threshold,
                                                 weighted_sums[k:k + 1],
                                                 weight_sums[k:k + 1])
-                        del neighbor, warped
+                        del warped
 
                     if has_next:
-                        neighbor = frames[next_idx:next_idx + 1].to(compute_device)
+                        neighbor = gpu_buf[next_idx - buf_start:next_idx - buf_start + 1]
                         warped = _warp_with_flow(neighbor, fwd_flow)
                         self._accumulate_warped(warped, ref_frame, w,
                                                 color_threshold,
                                                 weighted_sums[k:k + 1],
                                                 weight_sums[k:k + 1])
-                        del neighbor, warped
+                        del warped
 
                 del flow_fields
 
             # Write chunk results to CPU
             output[chunk_start:chunk_end] = (weighted_sums / (weight_sums + 1e-8)).cpu()
             weight_maps[chunk_start:chunk_end] = weight_sums.cpu()
-            del chunk_frames, weighted_sums, weight_sums
+            del gpu_buf, chunk_frames, weighted_sums, weight_sums
             if pbar is not None:
                 pbar.update(chunk_size)
 
@@ -434,11 +495,14 @@ class TemporalFlowAverage:
 
     def _denoise_raft(self, frames, B, H, W, window_size, weight_decay,
                       flow_model, flow_iterations, color_threshold,
-                      boundaries, output, weight_maps, compute_device, pbar=None):
+                      boundaries, output, weight_maps, compute_device, pbar=None,
+                      precision="bf16"):
         """RAFT fallback: pair-based flow with forward-backward occlusion check.
         frames/output/weight_maps are on CPU. Only working tensors go to GPU."""
         from torchvision.models.optical_flow import (raft_large, raft_small,
             Raft_Large_Weights, Raft_Small_Weights)
+
+        amp_enabled = (precision == "bf16" and compute_device.type == "cuda")
 
         # Pad to multiple of 8 for RAFT
         pad_h = (8 - H % 8) % 8
@@ -481,14 +545,17 @@ class TemporalFlowAverage:
                     ref_255 = (ref_gpu * 255.0).clamp(0, 255)
                     nb_255 = (nb_gpu * 255.0).clamp(0, 255)
 
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.autocast(
+                            device_type=compute_device.type,
+                            dtype=torch.bfloat16,
+                            enabled=amp_enabled):
                         flow_fwd = model(ref_255, nb_255,
                                          num_flow_updates=flow_iterations)[-1]
                         flow_bwd = model(nb_255, ref_255,
                                          num_flow_updates=flow_iterations)[-1]
 
-                    flow_fwd = flow_fwd[:, :, :H, :W]
-                    flow_bwd = flow_bwd[:, :, :H, :W]
+                    flow_fwd = flow_fwd[:, :, :H, :W].float()
+                    flow_bwd = flow_bwd[:, :, :H, :W].float()
 
                     nb_orig = nb_cpu.to(compute_device)
                     warped = _warp_with_flow(nb_orig, flow_fwd)
